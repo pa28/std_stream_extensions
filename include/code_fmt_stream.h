@@ -180,7 +180,6 @@ namespace fmt {
         }
 
         ~basic_fmtstream() override {
-            this->flush();
             delete filter;
         }
 
