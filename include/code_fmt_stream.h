@@ -5,7 +5,7 @@
 #pragma once
 
 #include <locale>
-#include "streams.h"
+#include <algorithm>
 
 namespace fmt {
 
@@ -28,19 +28,22 @@ namespace fmt {
         static constexpr char_type undent_code = traits_type::to_char_type(Undent);
     };
 
+    /**
+     * @brief An example of an output filter only stream buffer.
+     * @details When data is written to this stream buffer xputs is called. This function filters the stream
+     * and calls sputn on the next stream with the result.
+     * @tparam CharT the type of character the buffer will process.
+     * @tparam Traits the character traits type
+     */
     template<typename CharT,
-            typename Traits = std::char_traits<CharT>,
-            size_t WriteBufferSize = 64,
-            size_t ReadBufferSize = 8>
-    class basic_fmtstreambuf : public exp::basic_filter_streambuf<CharT, Traits, WriteBufferSize, ReadBufferSize> {
+            typename Traits = std::char_traits<CharT>>
+    class basic_fmtstreambuf : public std::basic_streambuf<CharT, Traits> {
     public:
         typedef CharT char_type;
         typedef Traits traits_type;
         typedef typename Traits::int_type int_type;
         typedef typename Traits::pos_type pos_type;
         typedef typename Traits::off_type off_type;
-        static constexpr size_t write_buffer_size = WriteBufferSize;
-        static constexpr size_t read_buffer_size = ReadBufferSize;
 
         size_t indent_increment{4};
 
@@ -52,11 +55,7 @@ namespace fmt {
          * @param next the next buffer in the chain
          */
         explicit basic_fmtstreambuf(std::basic_streambuf<CharT, Traits> *next)
-                : exp::basic_filter_streambuf<CharT, Traits, WriteBufferSize, ReadBufferSize>{next} {
-        }
-
-        ~basic_fmtstreambuf() override {
-            this->sync();
+                : next{next} {
         }
 
         basic_fmtstreambuf &indent() {
@@ -71,9 +70,30 @@ namespace fmt {
         }
 
     protected:
+        std::basic_streambuf<CharT, Traits> *next{nullptr};
         bool at_start_of_line{true};
         size_t indent_level{0};
         std::locale locale{};
+        size_t pending_indent{0};
+
+        /**
+         * @brief Output the number of spaces needed for indentation.
+         * @param indentation_count required spaces
+         * @return the number of spaces which could not be output and are left pending.
+         */
+        off_type do_indentation(off_type indentation_count) {
+            // Spaces for making indentation more efficient.
+            static char_type spaces[] = "                ";
+            static constexpr size_t spaces_count = sizeof(spaces);
+
+            for (pending_indent = indentation_count;
+                 pending_indent > 0; pending_indent -= std::min(pending_indent, spaces_count))
+                if (next->sputn(spaces, std::min(pending_indent, spaces_count)) !=
+                    std::min(pending_indent, spaces_count))
+                    return pending_indent; // Can not write all characters
+
+            return 0;
+        }
 
         /**
          * @brief A virtual method which implements the filter function.
@@ -83,13 +103,22 @@ namespace fmt {
          * @param count the number of characters in obuf.
          * @return the number of characters process by the filter.
          */
-        std::streamsize filter_write(const char_type *obuf, std::streamsize count) override {
+        std::streamsize xsputn(const char_type *obuf, std::streamsize count) override {
+            // Indentation left over.
+            if (pending_indent > 0) {
+                if (do_indentation(pending_indent))
+                    return 0; // and still not done.
+            }
+
+            // Loop over the input buffer.
             for (off_type idx = 0; idx < count; ++idx) {
+                // Indentation level increase request.
                 if (traits_type::eq(obuf[idx], control_codes<char_type, traits_type>::indent_code)) {
                     indent();
                     continue;
                 }
 
+                // Indentation level decrease request.
                 if (traits_type::eq(obuf[idx], control_codes<char_type, traits_type>::undent_code)) {
                     undent();
                     continue;
@@ -101,15 +130,14 @@ namespace fmt {
                         continue;
                     }
                     // Except as the indicated indentation before the first non-space character.
-                    for (off_type ind = 0; ind < indent_level * indent_increment; ++ind)
-                        if (this->next->sputc(' ') == traits_type::eof())
-                            return idx;
+                    if (do_indentation(indent_level * indent_increment))
+                        return idx; // Can not write all characters
                 }
 
                 at_start_of_line = traits_type::eq(obuf[idx], EndOfLine);
 
-                if (this->next->sputc(obuf[idx]) == traits_type::eof())
-                    return idx;
+                if (this->next->sputn(obuf + idx, 1) != 1)
+                    return idx; // Can not write all characters
             }
 
             return count;
@@ -121,7 +149,7 @@ namespace fmt {
          * @param count The number of characters which may be written into ibuf
          * @return the actual number of characters written into ibuf
          */
-        std::streamsize filter_read(char_type *ibuf, std::streamsize count) override {
+        std::streamsize xsgetn(char_type *ibuf, std::streamsize count) override {
             return count;
         }
     };
@@ -153,6 +181,9 @@ namespace fmt {
         basic_fmtstreambuf<CharT, Traits> *filter{nullptr};
     };
 
+    /**
+     * Manipulators and support functions.
+     */
     template<typename CharT, typename Traits>
     std::basic_ostream<CharT, Traits> &eol(std::basic_ostream<CharT, Traits> &ostream) {
         return ostream << control_codes<CharT, Traits>::end_of_line;
@@ -187,6 +218,15 @@ namespace fmt {
         return code;
     }
 
+    template<typename CharT, typename Traits = std::char_traits<CharT>>
+    std::basic_string<CharT, Traits> basic_sft_end(CharT close_brace) {
+        std::basic_string<CharT, Traits> code{};
+        code.push_back(control_codes<CharT, Traits>::undent_code);
+        code.push_back(control_codes<CharT, Traits>::end_of_line);
+        code.push_back(close_brace);
+        return code;
+    }
+
     std::string begin(char open_brace) {
         return basic_begin<char>(open_brace);
     }
@@ -194,4 +234,14 @@ namespace fmt {
     std::string end(char close_brace) {
         return basic_end<char>(close_brace);
     }
+
+    std::string sft_end(char close_brace) {
+        return basic_sft_end<char>(close_brace);
+    }
+
+    using fmtstreambuf = basic_fmtstreambuf<char>;
+    using fmtstream = basic_fmtstream<char>;
+
+    using wfmtstreambuf = basic_fmtstreambuf<wchar_t>;
+    using wfmtstream = basic_fmtstream<wchar_t>;
 }
