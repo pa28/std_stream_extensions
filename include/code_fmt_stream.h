@@ -154,6 +154,13 @@ namespace fmt {
         }
     };
 
+    /**
+     * @brief An output stream which uses basic_fmtstreambuf to format text.
+     * @details Constructed with a std::basic_streambuf which is the ultimate destination, the stream inserts
+     * a basic_fmtstreambuf which performs the formatting.
+     * @tparam CharT the character type
+     * @tparam Traits the character traits
+     */
     template<typename CharT,
             typename Traits = std::char_traits<CharT>>
     class basic_fmtstream : public std::basic_ostream<CharT, Traits> {
